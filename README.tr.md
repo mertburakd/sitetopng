@@ -2,28 +2,28 @@
 
 [English](README.md) | [Türkçe](README.tr.md)
 
-This tool crawls pages within a given domain and captures full-page (`full_page=True`) PNG screenshots.
+Bu arac, verilen bir domain icindeki sayfalari gezer ve tam sayfa (`full_page=True`) PNG ekran goruntuleri alir.
 
-## Features
+## Ozellikler
 
-- Uses a visible browser with `headless=False`.
-- URL discovery flow: `sitemap.xml` (and sitemap index) first, then in-page links.
-- Stays inside the same domain by default (optional subdomain support).
-- Produces run outputs:
+- `headless=False` ile gorunur tarayici kullanir.
+- URL kesif sirasi: once `sitemap.xml` (ve sitemap index), sonra sayfa ici linkler.
+- Varsayilan olarak ayni domain icinde kalir (opsiyonel subdomain destegi var).
+- Calisma ciktilari:
   - `manifest.jsonl`
   - `summary.json`
-- Stores screenshots in:
+- Ekran goruntuleri:
   - `screenshots/`
-- Screenshot names are URL-based and readable:
+- Dosya adlari URL'den okunur bicimde uretilir:
   - `/tr/blog/2024te-surdurulebilirlik/` -> `tr-blog-2024te-surdurulebilirlik.png`
-  - If a name already exists, it appends `-2`, `-3`, etc.
+  - Ayni ad olusursa `-2`, `-3` gibi ekler.
 
-## Requirements
+## Gereksinimler
 
 - Python 3.10+
-- Preferably installed Chrome or Edge
+- Tercihen yuklu Chrome veya Edge
 
-## Setup
+## Kurulum
 
 ### Windows (PowerShell)
 
@@ -49,9 +49,9 @@ source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-Optional:
-- Default `--browser auto` tries installed Chrome/Edge first.
-- If you want Playwright Chromium only:
+Opsiyonel:
+- Varsayilan `--browser auto`, once sistemdeki Chrome/Edge'i dener.
+- Sadece Playwright Chromium kullanmak istersen:
 
 ```powershell
 # Windows
@@ -63,7 +63,7 @@ python -m playwright install chromium
 python3 -m playwright install chromium
 ```
 
-## Usage
+## Kullanim
 
 ### Windows (PowerShell)
 
@@ -77,7 +77,7 @@ python crawler.py --start-url https://example.com
 python3 crawler.py --start-url https://example.com
 ```
 
-All arguments (Windows):
+Tum argumanlar (Windows):
 
 ```powershell
 python crawler.py `
@@ -92,7 +92,7 @@ python crawler.py `
   --no-link-crawl
 ```
 
-All arguments (macOS / Linux):
+Tum argumanlar (macOS / Linux):
 
 ```bash
 python3 crawler.py \
@@ -107,23 +107,23 @@ python3 crawler.py \
   --no-link-crawl
 ```
 
-## CLI Arguments
+## CLI Argumanlari
 
-- `--start-url` (required): start URL.
-- `--output-dir` (optional): output directory.
-  - Default: `./captures/<domain>/<timestamp>`.
-- `--timeout-ms` (optional): page navigation timeout in milliseconds. Default `30000`.
-- `--max-pages` (optional): max pages to process.
-  - `0` means unlimited.
-- `--include-subdomains` (optional): include subdomains.
-- `--no-sitemap` (optional): disable sitemap discovery.
-- `--no-link-crawl` (optional): disable in-page link discovery.
-- `--browser` (optional): `auto|chromium|chrome|edge`.
-  - Default `auto`: Chrome -> Edge -> Playwright Chromium.
-- `--executable-path` (optional): full path to browser executable.
-  - If set, it takes precedence over `--browser`.
+- `--start-url` (zorunlu): baslangic URL.
+- `--output-dir` (opsiyonel): cikti klasoru.
+  - Varsayilan: `./captures/<domain>/<timestamp>`.
+- `--timeout-ms` (opsiyonel): sayfa acilis timeout degeri (ms). Varsayilan `30000`.
+- `--max-pages` (opsiyonel): islenecek maksimum sayfa.
+  - `0` limitsiz demektir.
+- `--include-subdomains` (opsiyonel): subdomainleri de dahil eder.
+- `--no-sitemap` (opsiyonel): sitemap kesfini kapatir.
+- `--no-link-crawl` (opsiyonel): sayfa ici link kesfini kapatir.
+- `--browser` (opsiyonel): `auto|chromium|chrome|edge`.
+  - Varsayilan `auto`: Chrome -> Edge -> Playwright Chromium.
+- `--executable-path` (opsiyonel): tarayici executable tam yolu.
+  - Verilirse `--browser` yerine bu yol kullanilir.
 
-## Browser Path Examples (Optional)
+## Tarayici Yolu Ornekleri (Opsiyonel)
 
 - Windows Chrome: `C:\Program Files\Google\Chrome\Application\chrome.exe`
 - Windows Edge: `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
@@ -132,9 +132,9 @@ python3 crawler.py \
 - Linux Chrome: `/usr/bin/google-chrome`
 - Linux Edge: `/usr/bin/microsoft-edge`
 
-## Output Structure
+## Cikti Yapisi
 
-Example:
+Ornek:
 
 ```text
 captures/
@@ -148,26 +148,26 @@ captures/
       summary.json
 ```
 
-`manifest.jsonl` contains per-URL records:
+`manifest.jsonl` URL bazli kayitlar icerir:
 - URL
-- status (`success`, `error`, `skipped_non_html`)
-- duration
-- error message
-- screenshot file
+- durum (`success`, `error`, `skipped_non_html`)
+- sure
+- hata mesaji
+- screenshot dosyasi
 
-`summary.json` contains run summary:
-- total discovered URLs
-- total processed URLs
-- success/error counts
-- start and end times
+`summary.json` toplam kosu ozetini icerir:
+- bulunan URL sayisi
+- islenen URL sayisi
+- basarili/hatali sayilar
+- baslangic ve bitis zamanlari
 
-## Notes
+## Notlar
 
-- `robots.txt` is read, and `Disallow` rules are only logged (not enforced).
-- No special auth/login flow is implemented.
-- Navigation wait strategy is fixed to `domcontentloaded`.
-- Visible browser mode is usually slower than headless mode.
+- `robots.txt` okunur, `Disallow` kurallari sadece loglanir (engellenmez).
+- Ozel auth/login akisi yoktur.
+- Navigasyon bekleme stratejisi sabit `domcontentloaded` kullanir.
+- Gorunur tarayici modu headless moda gore daha yavas olabilir.
 
-## License
+## Lisans
 
-MIT. See [LICENSE](LICENSE).
+MIT. Bkz: [LICENSE](LICENSE).
