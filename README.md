@@ -9,6 +9,7 @@ This tool crawls pages within a given domain and captures full-page (`full_page=
 - Uses a visible browser with `headless=False`.
 - URL discovery flow: `sitemap.xml` (and sitemap index) first, then in-page links.
 - Stays inside the same domain by default (optional subdomain support).
+- Optional unique layout mode: only keeps screenshots for pages with distinct HTML layout patterns.
 - Produces run outputs:
   - `manifest.jsonl`
   - `summary.json`
@@ -71,6 +72,12 @@ python3 -m playwright install chromium
 python crawler.py --start-url https://example.com
 ```
 
+Only unique page layouts (Windows):
+
+```powershell
+python crawler.py --start-url https://example.com --unique-layout-only
+```
+
 ### macOS / Linux (bash)
 
 ```bash
@@ -88,6 +95,7 @@ python crawler.py `
   --timeout-ms 30000 `
   --max-pages 0 `
   --include-subdomains `
+  --unique-layout-only `
   --no-sitemap `
   --no-link-crawl
 ```
@@ -103,6 +111,7 @@ python3 crawler.py \
   --timeout-ms 30000 \
   --max-pages 0 \
   --include-subdomains \
+  --unique-layout-only \
   --no-sitemap \
   --no-link-crawl
 ```
@@ -116,6 +125,8 @@ python3 crawler.py \
 - `--max-pages` (optional): max pages to process.
   - `0` means unlimited.
 - `--include-subdomains` (optional): include subdomains.
+- `--unique-layout-only` (optional): capture screenshots only for unique HTML layout patterns.
+  - Duplicate layouts are logged as `skipped_duplicate_layout`.
 - `--no-sitemap` (optional): disable sitemap discovery.
 - `--no-link-crawl` (optional): disable in-page link discovery.
 - `--browser` (optional): `auto|chromium|chrome|edge`.
@@ -150,15 +161,19 @@ captures/
 
 `manifest.jsonl` contains per-URL records:
 - URL
-- status (`success`, `error`, `skipped_non_html`)
+- status (`success`, `error`, `skipped_non_html`, `skipped_duplicate_layout`)
 - duration
 - error message
 - screenshot file
+- layout signature (for unique mode)
+- duplicate-of URL (for duplicate layout rows)
 
 `summary.json` contains run summary:
 - total discovered URLs
 - total processed URLs
 - success/error counts
+- skipped duplicate layout count
+- unique layout screenshot count
 - start and end times
 
 ## Notes

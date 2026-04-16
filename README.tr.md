@@ -9,6 +9,7 @@ Bu arac, verilen bir domain icindeki sayfalari gezer ve tam sayfa (`full_page=Tr
 - `headless=False` ile gorunur tarayici kullanir.
 - URL kesif sirasi: once `sitemap.xml` (ve sitemap index), sonra sayfa ici linkler.
 - Varsayilan olarak ayni domain icinde kalir (opsiyonel subdomain destegi var).
+- Opsiyonel unique layout modu: sadece farkli HTML desenlerine sahip sayfalarin screenshot'unu alir.
 - Calisma ciktilari:
   - `manifest.jsonl`
   - `summary.json`
@@ -71,6 +72,12 @@ python3 -m playwright install chromium
 python crawler.py --start-url https://example.com
 ```
 
+Sadece unique sayfa tipleri (Windows):
+
+```powershell
+python crawler.py --start-url https://example.com --unique-layout-only
+```
+
 ### macOS / Linux (bash)
 
 ```bash
@@ -88,6 +95,7 @@ python crawler.py `
   --timeout-ms 30000 `
   --max-pages 0 `
   --include-subdomains `
+  --unique-layout-only `
   --no-sitemap `
   --no-link-crawl
 ```
@@ -103,6 +111,7 @@ python3 crawler.py \
   --timeout-ms 30000 \
   --max-pages 0 \
   --include-subdomains \
+  --unique-layout-only \
   --no-sitemap \
   --no-link-crawl
 ```
@@ -116,6 +125,8 @@ python3 crawler.py \
 - `--max-pages` (opsiyonel): islenecek maksimum sayfa.
   - `0` limitsiz demektir.
 - `--include-subdomains` (opsiyonel): subdomainleri de dahil eder.
+- `--unique-layout-only` (opsiyonel): sadece unique HTML layout desenleri icin screenshot alir.
+  - Ayni desenler `skipped_duplicate_layout` olarak isaretlenir.
 - `--no-sitemap` (opsiyonel): sitemap kesfini kapatir.
 - `--no-link-crawl` (opsiyonel): sayfa ici link kesfini kapatir.
 - `--browser` (opsiyonel): `auto|chromium|chrome|edge`.
@@ -150,15 +161,19 @@ captures/
 
 `manifest.jsonl` URL bazli kayitlar icerir:
 - URL
-- durum (`success`, `error`, `skipped_non_html`)
+- durum (`success`, `error`, `skipped_non_html`, `skipped_duplicate_layout`)
 - sure
 - hata mesaji
 - screenshot dosyasi
+- layout signature (unique mod icin)
+- duplicate oldugu referans URL
 
 `summary.json` toplam kosu ozetini icerir:
 - bulunan URL sayisi
 - islenen URL sayisi
 - basarili/hatali sayilar
+- duplicate layout atlanan sayisi
+- unique layout screenshot sayisi
 - baslangic ve bitis zamanlari
 
 ## Notlar

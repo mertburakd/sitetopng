@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -89,6 +90,7 @@ class CrawlConfig:
     include_subdomains: bool
     sitemap_enabled: bool
     link_crawl_enabled: bool
+    unique_layout_only: bool
     browser: str
     executable_path: Path | None
 
@@ -228,6 +230,105 @@ def build_unique_screenshot_name(
 
     used_names.add(candidate)
     return candidate
+
+
+def normalize_layout_token(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", value.lower()).strip("-_")
+    return cleaned[:24]
+
+
+def is_stable_class_token(token: str) -> bool:
+    if not token:
+        return False
+    digit_count = sum(character.isdigit() for character in token)
+    if digit_count >= 4:
+        return False
+    if len(token) >= 24 and digit_count > 0:
+        return False
+    return True
+
+
+def build_layout_signature(html: str) -> str:
+    from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+    soup = BeautifulSoup(html, "lxml")
+
+    for selector in ("script", "style", "noscript", "template", "svg"):
+        for element in soup.find_all(selector):
+            element.decompose()
+
+    for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+        comment.extract()
+
+    root = soup.body or soup
+    max_nodes = 2500
+    stack: list[tuple[object, int]] = [(root, 0)]
+    tokens: list[str] = []
+    tag_counts: dict[str, int] = {}
+
+    while stack and len(tokens) < max_nodes:
+        node, depth = stack.pop()
+        if not isinstance(node, Tag):
+            continue
+
+        node_name = (node.name or "").lower()
+        child_nodes = list(node.children)
+        child_tags = [child for child in child_nodes if isinstance(child, Tag)]
+
+        for child in reversed(child_tags):
+            stack.append((child, depth + 1))
+
+        if node_name in {"[document]", "html", "body"}:
+            continue
+
+        tag_counts[node_name] = tag_counts.get(node_name, 0) + 1
+        has_text = any(
+            isinstance(child, NavigableString) and str(child).strip()
+            for child in child_nodes
+        )
+
+        token_parts = [
+            node_name,
+            f"d{min(depth, 8)}",
+            f"k{min(len(child_tags), 9)}",
+            f"t{1 if has_text else 0}",
+        ]
+
+        role_value = node.get("role")
+        if isinstance(role_value, str):
+            role_token = normalize_layout_token(role_value)
+            if role_token:
+                token_parts.append(f"r:{role_token}")
+
+        type_value = node.get("type")
+        if isinstance(type_value, str):
+            type_token = normalize_layout_token(type_value)
+            if type_token:
+                token_parts.append(f"y:{type_token}")
+
+        class_values = node.get("class") or []
+        stable_classes: list[str] = []
+        for class_value in class_values:
+            normalized_class = normalize_layout_token(str(class_value))
+            if not is_stable_class_token(normalized_class):
+                continue
+            stable_classes.append(normalized_class)
+            if len(stable_classes) >= 2:
+                break
+        if stable_classes:
+            deduped = sorted(set(stable_classes))
+            token_parts.append(f"c:{','.join(deduped)}")
+
+        tokens.append("|".join(token_parts))
+
+    top_counts = sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:16]
+    payload = (
+        f"nodes={len(tokens)}\n"
+        + "\n".join(tokens)
+        + "\n--\n"
+        + "|".join(f"{name}:{count}" for name, count in top_counts)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
 def fetch_text(url: str, timeout_seconds: float) -> tuple[int | None, str, str]:
@@ -489,6 +590,8 @@ def crawl(config: CrawlConfig) -> int:
     log(f"Cikti klasoru: {output_dir}")
     log(f"Tarayici modu: gorunur (headless=False), secim={config.browser}")
     log(f"Navigasyon bekleme stratejisi: {NAVIGATION_WAIT_UNTIL}")
+    if config.unique_layout_only:
+        log("Unique layout modu aktif: sadece farkli HTML desenleri screenshot alinacak.")
 
     queue: deque[str] = deque()
     enqueued: set[str] = set()
@@ -528,6 +631,8 @@ def crawl(config: CrawlConfig) -> int:
     success_count = 0
     error_count = 0
     skipped_non_html_count = 0
+    skipped_duplicate_layout_count = 0
+    unique_layout_count = 0
 
     with manifest_path.open("a", encoding="utf-8") as manifest_file:
         with sync_playwright() as playwright:
@@ -535,6 +640,7 @@ def crawl(config: CrawlConfig) -> int:
             context = browser.new_context(ignore_https_errors=True)
             page = context.new_page()
             used_screenshot_names: set[str] = set()
+            layout_signature_to_url: dict[str, str] = {}
 
             try:
                 while queue:
@@ -555,6 +661,8 @@ def crawl(config: CrawlConfig) -> int:
                     screenshot_name = ""
                     http_status = None
                     content_type = ""
+                    layout_signature = ""
+                    duplicate_of_url = ""
                     discovered_links_count = 0
                     enqueued_links_count = 0
                     queue_after_pop = len(queue)
@@ -580,17 +688,37 @@ def crawl(config: CrawlConfig) -> int:
                             )
                         else:
                             auto_scroll_for_lazy_content(page)
-                            screenshot_name = build_unique_screenshot_name(
-                                slug=slugify_url(current_url),
-                                screenshots_dir=screenshots_dir,
-                                used_names=used_screenshot_names,
-                            )
-                            screenshot_path = screenshots_dir / screenshot_name
-                            page.screenshot(path=str(screenshot_path), full_page=True)
-                            success_count += 1
+                            html = ""
+                            if config.link_crawl_enabled or config.unique_layout_only:
+                                html = page.content()
+
+                            take_screenshot = True
+                            if config.unique_layout_only:
+                                layout_signature = build_layout_signature(html)
+                                duplicate_of_url = layout_signature_to_url.get(layout_signature, "")
+                                if duplicate_of_url:
+                                    take_screenshot = False
+                                    status = "skipped_duplicate_layout"
+                                    skipped_duplicate_layout_count += 1
+                                    log(
+                                        f"[{page_number}] Layout duplicate, screenshot atlandi. "
+                                        f"Ilk ornek: {duplicate_of_url}"
+                                    )
+                                else:
+                                    layout_signature_to_url[layout_signature] = current_url
+                                    unique_layout_count += 1
+
+                            if take_screenshot:
+                                screenshot_name = build_unique_screenshot_name(
+                                    slug=slugify_url(current_url),
+                                    screenshots_dir=screenshots_dir,
+                                    used_names=used_screenshot_names,
+                                )
+                                screenshot_path = screenshots_dir / screenshot_name
+                                page.screenshot(path=str(screenshot_path), full_page=True)
+                                success_count += 1
 
                             if config.link_crawl_enabled:
-                                html = page.content()
                                 links = extract_internal_links(
                                     html=html,
                                     current_url=current_url,
@@ -620,6 +748,8 @@ def crawl(config: CrawlConfig) -> int:
                         "http_status": http_status,
                         "content_type": content_type,
                         "screenshot_file": screenshot_name,
+                        "layout_signature": layout_signature,
+                        "duplicate_of_url": duplicate_of_url,
                         "duration_ms": elapsed_ms,
                         "error": error_message,
                         "discovered_links": discovered_links_count,
@@ -648,6 +778,7 @@ def crawl(config: CrawlConfig) -> int:
         "include_subdomains": config.include_subdomains,
         "sitemap_enabled": config.sitemap_enabled,
         "link_crawl_enabled": config.link_crawl_enabled,
+        "unique_layout_only": config.unique_layout_only,
         "browser": config.browser,
         "executable_path": str(config.executable_path) if config.executable_path else None,
         "wait_until": NAVIGATION_WAIT_UNTIL,
@@ -664,6 +795,8 @@ def crawl(config: CrawlConfig) -> int:
         "success_total": success_count,
         "error_total": error_count,
         "skipped_non_html_total": skipped_non_html_count,
+        "skipped_duplicate_layout_total": skipped_duplicate_layout_count,
+        "unique_layout_total": unique_layout_count,
         "remaining_in_queue": len(queue),
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -674,6 +807,9 @@ def crawl(config: CrawlConfig) -> int:
     log(f"Basarili screenshot: {summary['success_total']}")
     log(f"Hata: {summary['error_total']}")
     log(f"HTML olmayan atlanan: {summary['skipped_non_html_total']}")
+    log(f"Duplicate layout atlanan: {summary['skipped_duplicate_layout_total']}")
+    if config.unique_layout_only:
+        log(f"Unique layout screenshot sayisi: {summary['unique_layout_total']}")
     log(f"Manifest: {manifest_path}")
     log(f"Ozet: {summary_path}")
 
@@ -722,6 +858,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Sayfa ici link kesfini devre disi birakir.",
     )
     parser.add_argument(
+        "--unique-layout-only",
+        action="store_true",
+        help=(
+            "Ayni HTML layout desenine sahip sayfalardan sadece ilkini screenshot alir. "
+            "Digerleri manifest'e skipped_duplicate_layout olarak yazilir."
+        ),
+    )
+    parser.add_argument(
         "--browser",
         choices=["auto", "chromium", "chrome", "edge"],
         default="auto",
@@ -760,6 +904,7 @@ def parse_args(argv: list[str] | None = None) -> CrawlConfig:
         include_subdomains=args.include_subdomains,
         sitemap_enabled=not args.no_sitemap,
         link_crawl_enabled=not args.no_link_crawl,
+        unique_layout_only=args.unique_layout_only,
         browser=args.browser,
         executable_path=executable_path,
     )
