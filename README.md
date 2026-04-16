@@ -10,6 +10,7 @@ This tool crawls pages within a given domain and captures full-page (`full_page=
 - URL discovery flow: `sitemap.xml` (and sitemap index) first, then in-page links.
 - Stays inside the same domain by default (optional subdomain support).
 - Optional unique layout mode: only keeps screenshots for pages with distinct HTML layout patterns.
+- Parallel tab support: you can increase simultaneously open tabs to speed up crawling.
 - Produces run outputs:
   - `manifest.jsonl`
   - `summary.json`
@@ -93,6 +94,7 @@ python crawler.py `
   --browser auto `
   --executable-path "C:\Program Files\Google\Chrome\Application\chrome.exe" `
   --timeout-ms 30000 `
+  --max-tabs 4 `
   --max-pages 0 `
   --include-subdomains `
   --unique-layout-only `
@@ -109,6 +111,7 @@ python3 crawler.py \
   --browser auto \
   --executable-path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --timeout-ms 30000 \
+  --max-tabs 4 \
   --max-pages 0 \
   --include-subdomains \
   --unique-layout-only \
@@ -122,6 +125,8 @@ python3 crawler.py \
 - `--output-dir` (optional): output directory.
   - Default: `./captures/<domain>/<timestamp>`.
 - `--timeout-ms` (optional): page navigation timeout in milliseconds. Default `30000`.
+- `--max-tabs` (optional): number of parallel browser tabs. Default `1`.
+  - Higher values can speed up crawling on powerful machines.
 - `--max-pages` (optional): max pages to process.
   - `0` means unlimited.
 - `--include-subdomains` (optional): include subdomains.

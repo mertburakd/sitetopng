@@ -10,6 +10,7 @@ Bu arac, verilen bir domain icindeki sayfalari gezer ve tam sayfa (`full_page=Tr
 - URL kesif sirasi: once `sitemap.xml` (ve sitemap index), sonra sayfa ici linkler.
 - Varsayilan olarak ayni domain icinde kalir (opsiyonel subdomain destegi var).
 - Opsiyonel unique layout modu: sadece farkli HTML desenlerine sahip sayfalarin screenshot'unu alir.
+- Paralel sekme destegi: ayni anda acilan sekme sayisini artirarak tarama hizini yukseltebilirsin.
 - Calisma ciktilari:
   - `manifest.jsonl`
   - `summary.json`
@@ -93,6 +94,7 @@ python crawler.py `
   --browser auto `
   --executable-path "C:\Program Files\Google\Chrome\Application\chrome.exe" `
   --timeout-ms 30000 `
+  --max-tabs 4 `
   --max-pages 0 `
   --include-subdomains `
   --unique-layout-only `
@@ -109,6 +111,7 @@ python3 crawler.py \
   --browser auto \
   --executable-path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --timeout-ms 30000 \
+  --max-tabs 4 \
   --max-pages 0 \
   --include-subdomains \
   --unique-layout-only \
@@ -122,6 +125,8 @@ python3 crawler.py \
 - `--output-dir` (opsiyonel): cikti klasoru.
   - Varsayilan: `./captures/<domain>/<timestamp>`.
 - `--timeout-ms` (opsiyonel): sayfa acilis timeout degeri (ms). Varsayilan `30000`.
+- `--max-tabs` (opsiyonel): ayni anda acilacak paralel sekme sayisi. Varsayilan `1`.
+  - Guclu makinelerde deger arttikca tarama hizi artabilir.
 - `--max-pages` (opsiyonel): islenecek maksimum sayfa.
   - `0` limitsiz demektir.
 - `--include-subdomains` (opsiyonel): subdomainleri de dahil eder.

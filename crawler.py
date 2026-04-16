@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import re
@@ -131,6 +132,7 @@ class CrawlConfig:
     start_url: str
     output_dir: Path | None
     timeout_ms: int
+    max_tabs: int
     max_pages: int
     include_subdomains: bool
     sitemap_enabled: bool
@@ -591,8 +593,8 @@ def extract_internal_links(
     return links
 
 
-def auto_scroll_for_lazy_content(page) -> None:
-    page.evaluate(
+async def auto_scroll_for_lazy_content(page) -> None:
+    await page.evaluate(
         """
         async () => {
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -621,15 +623,15 @@ def build_output_dir(start_url: str, user_output_dir: Path | None) -> Path:
     return (Path.cwd() / "captures" / host / timestamp).resolve()
 
 
-def launch_visible_browser(playwright, config: CrawlConfig):
-    from playwright.sync_api import Error as PlaywrightError
+async def launch_visible_browser(playwright, config: CrawlConfig):
+    from playwright.async_api import Error as PlaywrightError
 
     if config.executable_path is not None:
         browser_path = config.executable_path.expanduser().resolve()
         if not browser_path.exists():
             raise RuntimeError(f"--executable-path bulunamadi: {browser_path}")
         log(f"Tarayici aciliyor (executable-path): {browser_path}")
-        return playwright.chromium.launch(
+        return await playwright.chromium.launch(
             headless=False,
             executable_path=str(browser_path),
         )
@@ -653,7 +655,7 @@ def launch_visible_browser(playwright, config: CrawlConfig):
     for label, extra in launch_plan:
         try:
             log(f"Tarayici aciliyor: {label} (headless=False)")
-            return playwright.chromium.launch(headless=False, **extra)
+            return await playwright.chromium.launch(headless=False, **extra)
         except PlaywrightError as exc:
             errors.append(f"{label}: {exc}")
 
@@ -666,10 +668,10 @@ def launch_visible_browser(playwright, config: CrawlConfig):
     )
 
 
-def crawl(config: CrawlConfig) -> int:
+async def crawl_async(config: CrawlConfig) -> int:
     try:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.async_api import async_playwright
     except ImportError as exc:
         raise RuntimeError(
             "Playwright bagimliligi bulunamadi. "
@@ -694,6 +696,7 @@ def crawl(config: CrawlConfig) -> int:
     log(f"Cikti klasoru: {output_dir}")
     log(f"Tarayici modu: gorunur (headless=False), secim={config.browser}")
     log(f"Navigasyon bekleme stratejisi: {NAVIGATION_WAIT_UNTIL}")
+    log(f"Paralel sekme sayisi: {config.max_tabs}")
     if config.unique_layout_only:
         log("Unique layout modu aktif: sadece farkli HTML desenleri screenshot alinacak.")
 
@@ -736,143 +739,206 @@ def crawl(config: CrawlConfig) -> int:
     error_count = 0
     skipped_non_html_count = 0
     skipped_duplicate_layout_count = 0
-    unique_layout_count = 0
+    used_screenshot_names: set[str] = set()
+    layout_signature_to_url: dict[str, str] = {}
+    shared_state_lock = asyncio.Lock()
+    max_pages_reached = False
+
+    async def process_url_with_page(
+        page,
+        current_url: str,
+        page_number: int,
+        queue_after_pop: int,
+    ) -> dict:
+        page_started = time.perf_counter()
+        status = "success"
+        error_message = ""
+        screenshot_name = ""
+        http_status = None
+        content_type = ""
+        layout_signature = ""
+        duplicate_of_url = ""
+        discovered_links: set[str] = set()
+
+        try:
+            response = await page.goto(
+                current_url,
+                wait_until=NAVIGATION_WAIT_UNTIL,
+                timeout=config.timeout_ms,
+            )
+            if response is not None:
+                http_status = response.status
+                content_type = response.headers.get("content-type", "")
+
+            if content_type and (
+                "text/html" not in content_type and "application/xhtml+xml" not in content_type
+            ):
+                status = "skipped_non_html"
+            else:
+                await auto_scroll_for_lazy_content(page)
+                html = ""
+                if config.link_crawl_enabled or config.unique_layout_only:
+                    html = await page.content()
+
+                take_screenshot = True
+                if config.unique_layout_only:
+                    layout_signature = build_layout_signature(html)
+                    async with shared_state_lock:
+                        duplicate_of_url = layout_signature_to_url.get(layout_signature, "")
+                        if duplicate_of_url:
+                            take_screenshot = False
+                        else:
+                            layout_signature_to_url[layout_signature] = current_url
+                    if duplicate_of_url:
+                        status = "skipped_duplicate_layout"
+
+                if take_screenshot:
+                    async with shared_state_lock:
+                        screenshot_name = build_unique_screenshot_name(
+                            slug=slugify_url(current_url),
+                            screenshots_dir=screenshots_dir,
+                            used_names=used_screenshot_names,
+                        )
+                    screenshot_path = screenshots_dir / screenshot_name
+                    await page.screenshot(path=str(screenshot_path), full_page=True)
+
+                if config.link_crawl_enabled:
+                    discovered_links = extract_internal_links(
+                        html=html,
+                        current_url=current_url,
+                        base_host=base_host,
+                        include_subdomains=config.include_subdomains,
+                    )
+        except PlaywrightTimeoutError:
+            status = "error"
+            error_message = f"Timeout ({config.timeout_ms} ms)"
+        except Exception as exc:
+            status = "error"
+            error_message = str(exc)
+
+        elapsed_ms = int((time.perf_counter() - page_started) * 1000)
+        return {
+            "index": page_number,
+            "url": current_url,
+            "status": status,
+            "http_status": http_status,
+            "content_type": content_type,
+            "screenshot_file": screenshot_name,
+            "layout_signature": layout_signature,
+            "duplicate_of_url": duplicate_of_url,
+            "duration_ms": elapsed_ms,
+            "error": error_message,
+            "discovered_links_set": discovered_links,
+            "queue_after_pop": queue_after_pop,
+        }
 
     with manifest_path.open("a", encoding="utf-8") as manifest_file:
-        with sync_playwright() as playwright:
-            browser = launch_visible_browser(playwright, config)
-            context = browser.new_context(ignore_https_errors=True)
-            page = context.new_page()
-            used_screenshot_names: set[str] = set()
-            layout_signature_to_url: dict[str, str] = {}
+        async with async_playwright() as playwright:
+            browser = await launch_visible_browser(playwright, config)
+            context = await browser.new_context(ignore_https_errors=True)
+            pages = [await context.new_page() for _ in range(config.max_tabs)]
 
             try:
                 while queue:
                     if config.max_pages > 0 and len(processed) >= config.max_pages:
-                        log(f"--max-pages siniri nedeniyle durduruldu: {config.max_pages}")
+                        max_pages_reached = True
                         break
 
-                    current_url = queue.popleft()
-                    if current_url in processed:
+                    batch_jobs: list[tuple[object, str, int, int]] = []
+                    while queue and len(batch_jobs) < len(pages):
+                        if config.max_pages > 0 and len(processed) >= config.max_pages:
+                            max_pages_reached = True
+                            break
+
+                        current_url = queue.popleft()
+                        if current_url in processed:
+                            continue
+
+                        processed.add(current_url)
+                        page_number = len(processed)
+                        queue_after_pop = len(queue)
+                        page = pages[len(batch_jobs)]
+                        batch_jobs.append((page, current_url, page_number, queue_after_pop))
+
+                    if not batch_jobs:
                         continue
-                    processed.add(current_url)
 
-                    page_number = len(processed)
-                    log(f"[{page_number}] Aciliyor: {current_url}")
-                    page_started = time.perf_counter()
-                    status = "success"
-                    error_message = ""
-                    screenshot_name = ""
-                    http_status = None
-                    content_type = ""
-                    layout_signature = ""
-                    duplicate_of_url = ""
-                    discovered_links_count = 0
-                    enqueued_links_count = 0
-                    queue_after_pop = len(queue)
+                    for _, current_url, page_number, _ in batch_jobs:
+                        log(f"[{page_number}] Aciliyor: {current_url}")
 
-                    try:
-                        response = page.goto(
-                            current_url,
-                            wait_until=NAVIGATION_WAIT_UNTIL,
-                            timeout=config.timeout_ms,
+                    tasks = [
+                        process_url_with_page(
+                            page=page,
+                            current_url=current_url,
+                            page_number=page_number,
+                            queue_after_pop=queue_after_pop,
                         )
-                        if response is not None:
-                            http_status = response.status
-                            content_type = response.headers.get("content-type", "")
+                        for page, current_url, page_number, queue_after_pop in batch_jobs
+                    ]
+                    results = await asyncio.gather(*tasks)
 
-                        if content_type and (
-                            "text/html" not in content_type
-                            and "application/xhtml+xml" not in content_type
-                        ):
-                            status = "skipped_non_html"
+                    for result in sorted(results, key=lambda item: item["index"]):
+                        status = result["status"]
+                        current_url = result["url"]
+                        page_number = result["index"]
+                        discovered_links = result.pop("discovered_links_set")
+                        enqueued_links_count = 0
+
+                        if status == "success":
+                            success_count += 1
+                        elif status == "skipped_non_html":
                             skipped_non_html_count += 1
                             log(
-                                f"[{page_number}] HTML degil ({content_type}), screenshot alinmadi."
+                                f"[{page_number}] HTML degil ({result['content_type']}), "
+                                "screenshot alinmadi."
+                            )
+                        elif status == "skipped_duplicate_layout":
+                            skipped_duplicate_layout_count += 1
+                            log(
+                                f"[{page_number}] Layout duplicate, screenshot atlandi. "
+                                f"Ilk ornek: {result['duplicate_of_url']}"
                             )
                         else:
-                            auto_scroll_for_lazy_content(page)
-                            html = ""
-                            if config.link_crawl_enabled or config.unique_layout_only:
-                                html = page.content()
+                            error_count += 1
+                            log(f"[{page_number}] Hata: {current_url} -> {result['error']}")
 
-                            take_screenshot = True
-                            if config.unique_layout_only:
-                                layout_signature = build_layout_signature(html)
-                                duplicate_of_url = layout_signature_to_url.get(layout_signature, "")
-                                if duplicate_of_url:
-                                    take_screenshot = False
-                                    status = "skipped_duplicate_layout"
-                                    skipped_duplicate_layout_count += 1
-                                    log(
-                                        f"[{page_number}] Layout duplicate, screenshot atlandi. "
-                                        f"Ilk ornek: {duplicate_of_url}"
-                                    )
-                                else:
-                                    layout_signature_to_url[layout_signature] = current_url
-                                    unique_layout_count += 1
+                        for link in discovered_links:
+                            if enqueue(link):
+                                enqueued_links_count += 1
+                        discovered_links_count = len(discovered_links)
 
-                            if take_screenshot:
-                                screenshot_name = build_unique_screenshot_name(
-                                    slug=slugify_url(current_url),
-                                    screenshots_dir=screenshots_dir,
-                                    used_names=used_screenshot_names,
-                                )
-                                screenshot_path = screenshots_dir / screenshot_name
-                                page.screenshot(path=str(screenshot_path), full_page=True)
-                                success_count += 1
+                        manifest_record = {
+                            "index": page_number,
+                            "url": current_url,
+                            "status": status,
+                            "http_status": result["http_status"],
+                            "content_type": result["content_type"],
+                            "screenshot_file": result["screenshot_file"],
+                            "layout_signature": result["layout_signature"],
+                            "duplicate_of_url": result["duplicate_of_url"],
+                            "duration_ms": result["duration_ms"],
+                            "error": result["error"],
+                            "discovered_links": discovered_links_count,
+                            "enqueued_links": enqueued_links_count,
+                            "timestamp": to_iso_now(),
+                        }
+                        manifest_file.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
+                        manifest_file.flush()
 
-                            if config.link_crawl_enabled:
-                                links = extract_internal_links(
-                                    html=html,
-                                    current_url=current_url,
-                                    base_host=base_host,
-                                    include_subdomains=config.include_subdomains,
-                                )
-                                for link in links:
-                                    if enqueue(link):
-                                        enqueued_links_count += 1
-                                discovered_links_count = len(links)
-                    except PlaywrightTimeoutError:
-                        status = "error"
-                        error_message = f"Timeout ({config.timeout_ms} ms)"
-                        error_count += 1
-                        log(f"[{page_number}] Zaman asimi: {current_url}")
-                    except Exception as exc:
-                        status = "error"
-                        error_message = str(exc)
-                        error_count += 1
-                        log(f"[{page_number}] Hata: {current_url} -> {exc}")
-
-                    elapsed_ms = int((time.perf_counter() - page_started) * 1000)
-                    manifest_record = {
-                        "index": page_number,
-                        "url": current_url,
-                        "status": status,
-                        "http_status": http_status,
-                        "content_type": content_type,
-                        "screenshot_file": screenshot_name,
-                        "layout_signature": layout_signature,
-                        "duplicate_of_url": duplicate_of_url,
-                        "duration_ms": elapsed_ms,
-                        "error": error_message,
-                        "discovered_links": discovered_links_count,
-                        "enqueued_links": enqueued_links_count,
-                        "timestamp": to_iso_now(),
-                    }
-                    manifest_file.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
-                    manifest_file.flush()
-
-                    if status == "success":
-                        log(
-                            f"[{page_number}] Tamamlandi ({elapsed_ms} ms). "
-                            f"Bulunan link: {discovered_links_count}, "
-                            f"kuyruga eklenen: {enqueued_links_count}, "
-                            f"kuyruk: {queue_after_pop} -> {len(queue)}"
-                        )
+                        if status == "success":
+                            log(
+                                f"[{page_number}] Tamamlandi ({result['duration_ms']} ms). "
+                                f"Bulunan link: {discovered_links_count}, "
+                                f"kuyruga eklenen: {enqueued_links_count}, "
+                                f"kuyruk: {result['queue_after_pop']} -> {len(queue)}"
+                            )
             finally:
-                context.close()
-                browser.close()
+                await context.close()
+                await browser.close()
+
+    unique_layout_count = len(layout_signature_to_url)
+    if max_pages_reached:
+        log(f"--max-pages siniri nedeniyle durduruldu: {config.max_pages}")
 
     finished_at = to_iso_now()
     duration_seconds = round(time.perf_counter() - started_perf, 3)
@@ -887,6 +953,7 @@ def crawl(config: CrawlConfig) -> int:
         "executable_path": str(config.executable_path) if config.executable_path else None,
         "wait_until": NAVIGATION_WAIT_UNTIL,
         "timeout_ms": config.timeout_ms,
+        "max_tabs": config.max_tabs,
         "max_pages": config.max_pages,
         "output_dir": str(output_dir),
         "screenshots_dir": str(screenshots_dir),
@@ -920,6 +987,10 @@ def crawl(config: CrawlConfig) -> int:
     return 0
 
 
+def crawl(config: CrawlConfig) -> int:
+    return asyncio.run(crawl_async(config))
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Verilen domain icin tum sayfalari gezip tam sayfa screenshot alan crawler."
@@ -939,6 +1010,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=30000,
         help="Sayfa yukleme timeout degeri (milisaniye). Varsayilan: 30000.",
+    )
+    parser.add_argument(
+        "--max-tabs",
+        type=int,
+        default=1,
+        help=(
+            "Ayni anda acilacak paralel sekme sayisi. "
+            "Varsayilan: 1 (tek sekme)."
+        ),
     )
     parser.add_argument(
         "--max-pages",
@@ -992,6 +1072,10 @@ def parse_args(argv: list[str] | None = None) -> CrawlConfig:
 
     if args.timeout_ms <= 0:
         parser.error("--timeout-ms 0'dan buyuk olmali.")
+    if args.max_tabs <= 0:
+        parser.error("--max-tabs 0'dan buyuk olmali.")
+    if args.max_tabs > 20:
+        parser.error("--max-tabs en fazla 20 olabilir.")
     if args.max_pages < 0:
         parser.error("--max-pages negatif olamaz.")
 
@@ -1004,6 +1088,7 @@ def parse_args(argv: list[str] | None = None) -> CrawlConfig:
         start_url=args.start_url,
         output_dir=output_dir,
         timeout_ms=args.timeout_ms,
+        max_tabs=args.max_tabs,
         max_pages=args.max_pages,
         include_subdomains=args.include_subdomains,
         sitemap_enabled=not args.no_sitemap,
