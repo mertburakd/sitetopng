@@ -127,6 +127,7 @@ python3 crawler.py \
 - `--include-subdomains` (opsiyonel): subdomainleri de dahil eder.
 - `--unique-layout-only` (opsiyonel): sadece unique HTML layout desenleri icin screenshot alir.
   - Ayni desenler `skipped_duplicate_layout` olarak isaretlenir.
+  - Liste/kart satiri adedi farklari (ornegin `foreach` ile basilan kayit sayisi) mumkun oldugunca template farki sayilmaz.
 - `--no-sitemap` (opsiyonel): sitemap kesfini kapatir.
 - `--no-link-crawl` (opsiyonel): sayfa ici link kesfini kapatir.
 - `--browser` (opsiyonel): `auto|chromium|chrome|edge`.

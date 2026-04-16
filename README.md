@@ -127,6 +127,7 @@ python3 crawler.py \
 - `--include-subdomains` (optional): include subdomains.
 - `--unique-layout-only` (optional): capture screenshots only for unique HTML layout patterns.
   - Duplicate layouts are logged as `skipped_duplicate_layout`.
+  - Repeated list/card row counts (for example `foreach` item count differences) are ignored as much as possible.
 - `--no-sitemap` (optional): disable sitemap discovery.
 - `--no-link-crawl` (optional): disable in-page link discovery.
 - `--browser` (optional): `auto|chromium|chrome|edge`.

@@ -79,6 +79,51 @@ SKIP_EXTENSIONS = {
     ".xml",
     ".zip",
 }
+LAYOUT_CLASS_KEYWORDS = {
+    "accordion",
+    "alert",
+    "article",
+    "banner",
+    "breadcrumbs",
+    "card",
+    "carousel",
+    "content",
+    "dialog",
+    "drawer",
+    "faq",
+    "feature",
+    "filter",
+    "footer",
+    "form",
+    "grid",
+    "header",
+    "hero",
+    "list",
+    "main",
+    "menu",
+    "modal",
+    "nav",
+    "pagination",
+    "panel",
+    "search",
+    "section",
+    "sidebar",
+    "step",
+    "tab",
+    "table",
+    "widget",
+}
+LAYOUT_LANDMARK_TAGS = (
+    "header",
+    "nav",
+    "main",
+    "aside",
+    "footer",
+    "form",
+    "table",
+    "section",
+    "article",
+)
 
 
 @dataclass
@@ -240,16 +285,22 @@ def normalize_layout_token(value: str) -> str:
 def is_stable_class_token(token: str) -> bool:
     if not token:
         return False
+    if len(token) < 3:
+        return False
     digit_count = sum(character.isdigit() for character in token)
     if digit_count >= 4:
         return False
-    if len(token) >= 24 and digit_count > 0:
+    if len(token) >= 20 and digit_count > 0:
+        return False
+    if re.fullmatch(r"[a-f0-9]{6,}", token):
+        return False
+    if re.search(r"-[a-f0-9]{6,}$", token):
         return False
     return True
 
 
 def build_layout_signature(html: str) -> str:
-    from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+    from bs4 import BeautifulSoup, Comment, Tag
 
     soup = BeautifulSoup(html, "lxml")
 
@@ -261,72 +312,125 @@ def build_layout_signature(html: str) -> str:
         comment.extract()
 
     root = soup.body or soup
-    max_nodes = 2500
-    stack: list[tuple[object, int]] = [(root, 0)]
-    tokens: list[str] = []
-    tag_counts: dict[str, int] = {}
+    node_visit_limit = 7000
+    node_visit_count = 0
 
-    while stack and len(tokens) < max_nodes:
-        node, depth = stack.pop()
-        if not isinstance(node, Tag):
-            continue
+    def semantic_class_hints(node) -> list[str]:
+        class_values = node.get("class") or []
+        hints: list[str] = []
+        for class_value in class_values:
+            normalized_class = normalize_layout_token(str(class_value))
+            if not is_stable_class_token(normalized_class):
+                continue
+            matched_keyword = ""
+            for keyword in LAYOUT_CLASS_KEYWORDS:
+                if keyword in normalized_class:
+                    matched_keyword = keyword
+                    break
+            if not matched_keyword:
+                continue
+            hints.append(matched_keyword)
+            if len(hints) >= 2:
+                break
+        return sorted(set(hints))
 
-        node_name = (node.name or "").lower()
-        child_nodes = list(node.children)
-        child_tags = [child for child in child_nodes if isinstance(child, Tag)]
-
-        for child in reversed(child_tags):
-            stack.append((child, depth + 1))
-
-        if node_name in {"[document]", "html", "body"}:
-            continue
-
-        tag_counts[node_name] = tag_counts.get(node_name, 0) + 1
-        has_text = any(
-            isinstance(child, NavigableString) and str(child).strip()
-            for child in child_nodes
-        )
-
-        token_parts = [
-            node_name,
-            f"d{min(depth, 8)}",
-            f"k{min(len(child_tags), 9)}",
-            f"t{1 if has_text else 0}",
-        ]
+    def collect_node_hints(node) -> list[str]:
+        hints: list[str] = []
 
         role_value = node.get("role")
         if isinstance(role_value, str):
             role_token = normalize_layout_token(role_value)
             if role_token:
-                token_parts.append(f"r:{role_token}")
+                hints.append(f"r:{role_token}")
 
         type_value = node.get("type")
         if isinstance(type_value, str):
             type_token = normalize_layout_token(type_value)
             if type_token:
-                token_parts.append(f"y:{type_token}")
+                hints.append(f"y:{type_token}")
 
-        class_values = node.get("class") or []
-        stable_classes: list[str] = []
-        for class_value in class_values:
-            normalized_class = normalize_layout_token(str(class_value))
-            if not is_stable_class_token(normalized_class):
+        semantic_classes = semantic_class_hints(node)
+        if semantic_classes:
+            hints.append(f"c:{','.join(semantic_classes)}")
+
+        return hints[:3]
+
+    def serialize_node(node, depth: int) -> str:
+        nonlocal node_visit_count
+        if not isinstance(node, Tag):
+            return ""
+        if depth > 18:
+            return "depth-limit"
+        if node_visit_count >= node_visit_limit:
+            return "node-limit"
+        node_visit_count += 1
+
+        node_name = (node.name or "").lower()
+        if not node_name:
+            return ""
+
+        child_signatures: list[str] = []
+        child_tag_names: set[str] = set()
+        child_limit = 60
+        child_seen = 0
+        for child in node.children:
+            if not isinstance(child, Tag):
                 continue
-            stable_classes.append(normalized_class)
-            if len(stable_classes) >= 2:
+            child_seen += 1
+            child_name = (child.name or "").lower()
+            if child_name:
+                child_tag_names.add(child_name)
+            child_signature = serialize_node(child, depth + 1)
+            if child_signature:
+                child_signatures.append(child_signature)
+            if child_seen >= child_limit:
                 break
-        if stable_classes:
-            deduped = sorted(set(stable_classes))
-            token_parts.append(f"c:{','.join(deduped)}")
 
-        tokens.append("|".join(token_parts))
+        compact_children: list[str] = []
+        for child_signature in child_signatures:
+            if compact_children and compact_children[-1] == child_signature:
+                continue
+            compact_children.append(child_signature)
+            if len(compact_children) >= 14:
+                break
 
-    top_counts = sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:16]
+        token_parts = [
+            node_name,
+            f"d{min(depth, 8)}",
+            f"k{min(len(child_tag_names), 6)}",
+        ]
+        token_parts.extend(collect_node_hints(node))
+        if child_tag_names:
+            token_parts.append(f"s:{','.join(sorted(child_tag_names)[:6])}")
+
+        payload = "|".join(token_parts) + "->" + ",".join(compact_children)
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:14]
+
+    root_signatures: list[str] = []
+    for child in root.children:
+        if not isinstance(child, Tag):
+            continue
+        child_signature = serialize_node(child, 1)
+        if not child_signature:
+            continue
+        if root_signatures and root_signatures[-1] == child_signature:
+            continue
+        root_signatures.append(child_signature)
+        if len(root_signatures) >= 24:
+            break
+
+    landmark_bits: list[str] = []
+    for landmark in LAYOUT_LANDMARK_TAGS:
+        count = len(root.find_all(landmark))
+        if count <= 0:
+            continue
+        landmark_bits.append(f"{landmark}:{min(count, 2)}")
+
     payload = (
-        f"nodes={len(tokens)}\n"
-        + "\n".join(tokens)
+        "layout-v2\n"
+        + "|".join(root_signatures)
         + "\n--\n"
-        + "|".join(f"{name}:{count}" for name, count in top_counts)
+        + "|".join(landmark_bits)
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
