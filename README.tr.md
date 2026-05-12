@@ -189,6 +189,77 @@ captures/
 - Navigasyon bekleme stratejisi sabit `domcontentloaded` kullanir.
 - Gorunur tarayici modu headless moda gore daha yavas olabilir.
 
+## Interaktif Capture Modu (`capture.py`)
+
+`capture.py`, REPL tabanli ikinci bir aractir. Crawler degildir: ona bir
+uygulamada manuel giris yapip istedigin ekrana git, sonra terminale `capture`
+komutu yaz, **o anki acik sekmenin** hedefli screenshot'unu alir.
+
+### Nasil calisir
+
+1. `open` komutu, Chrome / Edge'i `--remote-debugging-port` ile alt-process
+   olarak baslatir ve Playwright'i CDP uzerinden bagar.
+2. Acilan pencerede manuel giris yap, ilgili sayfaya git.
+3. Ayni terminaldeki REPL'e `capture ...` yaz.
+
+Persistent profil `~/.sitetopng/profiles/port-<PORT>/` altinda tutulur, bu
+sayede giris bilgilerin `open` cagrilari arasinda saklanir.
+
+### Hizli baslangic
+
+```bash
+# Tarayici ac + REPL (Windows / macOS / Linux)
+python capture.py open
+
+# uv ile (PEP 723 inline metadata):
+uv run capture.py open
+
+# REPL icinde:
+sitetopng > capture --viewport 1440x900 --name 01-dashboard
+sitetopng > capture --viewport 1200x900 --selector "[data-testid=score-donut]" --name donut
+sitetopng > capture --viewport 375x812 --full-page --name mobile-scroll
+sitetopng > list                      # acik sekmeleri listele
+sitetopng > cd ./portfolio            # varsayilan cikti klasoru
+sitetopng > exit
+```
+
+### Ayri terminalden tek seferlik capture
+
+Terminal A'da `open` calisirken Terminal B'de:
+
+```bash
+python capture.py capture --viewport 1440x900 --out hero.png
+python capture.py capture --selector ".score-card" --out card.png
+```
+
+### CLI Argumanlari
+
+`open` icin:
+
+- `--port` (varsayilan `9222`) — CDP portu.
+- `--browser` (`auto|chrome|edge|chromium`) — kullanilacak tarayici.
+- `--executable-path` — `chrome.exe` / `msedge.exe` icin acik yol.
+- `--profile-dir` — persistent user-data profilini override eder.
+- `--out-dir` — REPL'deki `capture`'lar icin varsayilan klasor (varsayilan: CWD).
+- `--start-url` — ilk acilacak URL (varsayilan: `about:blank`).
+
+`capture` icin (REPL icinde `capture` sonrasi da ayni argumanlar):
+
+- `--viewport WxH` — orn. `1440x900`, `1200x900` (Upwork portfolyo standardi),
+  `375x812` (mobil).
+- `--no-viewport` — hatirlanan viewport'u atla, tarayicinin mevcut boyutunu kullan.
+- `--selector CSS` — screenshot'u belirli bir elemana clip et.
+- `--full-page` — viewport disi tum scroll'u dahil et.
+- `--name SHORT` — `<out-dir>/<SHORT>.png` olarak kaydet.
+- `--out PATH` — acik cikti yolu (mutlak veya out-dir'e gore).
+- `--url-contains STR` — URL'i bu string'i iceren sekmeyi sec.
+- `--tab N` — sifir-tabanli sekme indexi (`list` ile gor).
+- `--wait-selector CSS` — capture'dan once bu elemanin gorunmesini bekle.
+- `--wait-ms N` — ek bekleme (ms, animasyonlar icin).
+
+REPL son `--viewport` degerini hatirlar; tekrar `--viewport` veya
+`--no-viewport` verene kadar ayni boyutu kullanir.
+
 ## Lisans
 
 MIT. Bkz: [LICENSE](LICENSE).

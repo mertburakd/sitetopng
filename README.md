@@ -189,6 +189,79 @@ captures/
 - Navigation wait strategy is fixed to `domcontentloaded`.
 - Visible browser mode is usually slower than headless mode.
 
+## Interactive Capture Mode (`capture.py`)
+
+`capture.py` is a separate, REPL-driven screenshot tool for use cases where you
+want to log into an app manually, navigate to specific screens, and then take
+targeted screenshots (specific viewport, full-page, or element clip). It does
+**not** crawl — it captures whatever tab is in front of you.
+
+### How it works
+
+1. `open` launches Chrome/Edge as a subprocess with `--remote-debugging-port`
+   and attaches Playwright over CDP.
+2. You log in and navigate manually in the opened window.
+3. From the same terminal's REPL prompt, type `capture` commands.
+
+A persistent user-data profile is stored at
+`~/.sitetopng/profiles/port-<PORT>/`, so your login survives across `open`
+sessions.
+
+### Quickstart
+
+```bash
+# Open browser + REPL (Windows / macOS / Linux)
+python capture.py open
+
+# Or with uv (PEP 723 inline metadata):
+uv run capture.py open
+
+# Inside the REPL:
+sitetopng > capture --viewport 1440x900 --name 01-dashboard
+sitetopng > capture --viewport 1200x900 --selector "[data-testid=score-donut]" --name donut
+sitetopng > capture --viewport 375x812 --full-page --name mobile-scroll
+sitetopng > list                      # show open tabs
+sitetopng > cd ./portfolio            # change default output dir
+sitetopng > exit
+```
+
+### One-off capture from another terminal
+
+While `open` is running in Terminal A, you can also use Terminal B:
+
+```bash
+python capture.py capture --viewport 1440x900 --out hero.png
+python capture.py capture --selector ".score-card" --out card.png
+```
+
+### CLI Reference
+
+`open` flags:
+
+- `--port` (default `9222`) — CDP port to expose.
+- `--browser` (`auto|chrome|edge|chromium`) — which browser to launch.
+- `--executable-path` — explicit path to `chrome.exe` / `msedge.exe`, etc.
+- `--profile-dir` — override the persistent user-data profile dir.
+- `--out-dir` — default output dir for REPL `capture` commands (default: CWD).
+- `--start-url` — page to open initially (default: `about:blank`).
+
+`capture` flags (also accepted inside the REPL after `capture`):
+
+- `--viewport WxH` — e.g. `1440x900`, `1200x900` (Upwork portfolio standard),
+  `375x812` (mobile).
+- `--no-viewport` — skip the remembered viewport, use the current browser size.
+- `--selector CSS` — clip the screenshot to a specific element.
+- `--full-page` — capture beyond the viewport (full scroll height).
+- `--name SHORT` — save as `<out-dir>/<SHORT>.png`.
+- `--out PATH` — explicit output path (absolute or relative to out-dir).
+- `--url-contains STR` — pick the tab whose URL contains this string.
+- `--tab N` — pick by zero-based tab index (use `list` to enumerate).
+- `--wait-selector CSS` — wait for this element to appear before capturing.
+- `--wait-ms N` — extra wait in milliseconds (useful for animations).
+
+The REPL remembers the last `--viewport`, so subsequent `capture` calls keep the
+same dimensions until you pass `--viewport` again or `--no-viewport`.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
