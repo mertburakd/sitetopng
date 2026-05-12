@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_PORT = 9222
+DEFAULT_PORT = 9533  # uncommon, sitetopng'e ait. 9222 (Chrome default) MCP'lerle çakışıyor.
 PROFILE_ROOT = Path.home() / ".sitetopng" / "profiles"
 DEFAULT_OUT_PATTERN = "capture_{ts}.png"
 
@@ -62,6 +62,42 @@ def parse_viewport(value: str) -> tuple[int, int]:
         return int(parts[0]), int(parts[1])
     except ValueError as exc:
         raise ValueError(f"Geçersiz viewport sayısı: {value!r}") from exc
+
+
+def _disable_session_restore(profile_dir: Path) -> None:
+    """Patch <profile>/Default/Preferences so Chrome doesn't reopen old tabs.
+
+    Chrome's `session.restore_on_startup` defaults to 1 ("continue where I left
+    off"), which makes stale tabs (NotebookLM, prior pages, etc.) reappear and
+    pollute the target-tab heuristic. Force value 5 ("New Tab page") and clear
+    any URL list.
+    """
+    default_dir = profile_dir / "Default"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    prefs_path = default_dir / "Preferences"
+
+    prefs: dict = {}
+    if prefs_path.exists():
+        try:
+            prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+        except Exception:
+            prefs = {}
+
+    session_prefs = prefs.get("session") or {}
+    session_prefs["restore_on_startup"] = 5
+    session_prefs["startup_urls"] = []
+    prefs["session"] = session_prefs
+
+    # Suppress the "Chrome didn't shut down correctly" bubble too.
+    profile_prefs = prefs.get("profile") or {}
+    profile_prefs["exit_type"] = "Normal"
+    profile_prefs["exited_cleanly"] = True
+    prefs["profile"] = profile_prefs
+
+    try:
+        prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+    except Exception as exc:
+        log(f"Uyarı: Preferences yazılamadı ({exc}); session restore aktif kalabilir.")
 
 
 def find_browser_executable(browser: str, executable_path: str | None) -> str:
@@ -138,6 +174,27 @@ def find_browser_executable(browser: str, executable_path: str | None) -> str:
     )
 
 
+def _probe_cdp(port: int, timeout: float = 1.5) -> dict | None:
+    """CDP /json/version'u yokla. Yanit varsa dict, yoksa None."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=timeout
+        ) as response:
+            if response.status == 200:
+                return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
+        pass
+    return None
+
+
+def _find_free_port(start: int, end: int = 9300) -> int | None:
+    """Belirtilen araliktaki ilk CDP-bos port. Yoksa None."""
+    for candidate in range(start, end + 1):
+        if _probe_cdp(candidate, timeout=0.5) is None:
+            return candidate
+    return None
+
+
 def wait_for_cdp(port: int, timeout: float = 20.0) -> dict:
     deadline = time.time() + timeout
     last_error: Exception | None = None
@@ -184,8 +241,47 @@ def resolve_out_path(args, session: SessionState) -> Path:
     return path
 
 
-async def pick_target_page(context, args):
-    pages = list(context.pages)
+async def _page_focus_state(page) -> tuple[bool, bool]:
+    """Returns (has_focus, is_visible). Falls back to (False, False) on error."""
+    try:
+        result = await page.evaluate(
+            "() => [typeof document!=='undefined' && document.hasFocus && document.hasFocus(), "
+            "typeof document!=='undefined' && document.visibilityState === 'visible']"
+        )
+        return bool(result[0]), bool(result[1])
+    except Exception:
+        return False, False
+
+
+async def _all_pages_across_contexts(browser_or_context):
+    """Gather pages across every browser context (some Chrome configs put
+    new tabs into a new context — the default-context-only loop misses them)."""
+    pages: list = []
+    # If passed a context, also enumerate sibling contexts via browser ref.
+    contexts = []
+    if hasattr(browser_or_context, "contexts"):
+        contexts = list(browser_or_context.contexts)
+    elif hasattr(browser_or_context, "browser") and browser_or_context.browser:
+        contexts = list(browser_or_context.browser.contexts)
+    else:
+        contexts = [browser_or_context]
+    for ctx in contexts:
+        for page in ctx.pages:
+            pages.append(page)
+    return pages
+
+
+async def pick_target_page(context_or_browser, args):
+    """Hedef sekmeyi sec.
+
+    Oncelik:
+    1. --tab N      → tum context'lerde N'inci sayfa
+    2. --url-contains STR → URL eslemesi
+    3. Aksi: document.hasFocus() === True olan sekme (kullanicinin baktigi)
+    4. Hala bulunmazsa: visibilityState === 'visible' olan
+    5. Son care: en son olusturulan (pages[-1])
+    """
+    pages = await _all_pages_across_contexts(context_or_browser)
     if not pages:
         return None
     if args.tab is not None:
@@ -198,6 +294,20 @@ async def pick_target_page(context, args):
             if needle in (page.url or "").lower():
                 return page
         return None
+
+    # Auto: find the focused page first.
+    focused: list = []
+    visible: list = []
+    for page in pages:
+        has_focus, is_visible = await _page_focus_state(page)
+        if has_focus:
+            focused.append(page)
+        elif is_visible:
+            visible.append(page)
+    if focused:
+        return focused[-1]
+    if visible:
+        return visible[-1]
     return pages[-1]
 
 
@@ -322,17 +432,23 @@ Komutlar:
     )
 
 
-async def list_pages(context) -> None:
-    pages = list(context.pages)
+async def list_pages(context_or_browser) -> None:
+    pages = await _all_pages_across_contexts(context_or_browser)
     if not pages:
         print("[!] Açık sekme yok.")
         return
+    print("    idx  focus  visible  url")
     for index, page in enumerate(pages):
-        title = (page.url or "").strip() or "about:blank"
-        print(f"  [{index}] {title}")
+        url = (page.url or "").strip() or "about:blank"
+        has_focus, is_visible = await _page_focus_state(page)
+        focus_marker = " ●   " if has_focus else "  ·  "
+        vis_marker = " ●     " if is_visible else "  ·    "
+        print(f"    [{index:>2}] {focus_marker}{vis_marker}{url}")
+    print()
+    print("    Auto-pick (capture without --tab / --url-contains): focused tab → visible → last.")
 
 
-async def repl_loop(context, session: SessionState) -> None:
+async def repl_loop(browser, session: SessionState) -> None:
     loop = asyncio.get_event_loop()
     print_repl_help()
     print(f"Varsayılan çıktı klasörü: {session.out_dir}")
@@ -361,7 +477,7 @@ async def repl_loop(context, session: SessionState) -> None:
             print_repl_help()
             continue
         if cmd == "list":
-            await list_pages(context)
+            await list_pages(browser)
             continue
         if cmd == "cd":
             if not rest:
@@ -378,7 +494,7 @@ async def repl_loop(context, session: SessionState) -> None:
                 cap_args = parser.parse_args(rest)
             except SystemExit:
                 continue
-            page = await pick_target_page(context, cap_args)
+            page = await pick_target_page(browser, cap_args)
             if page is None:
                 print("[!] Hedef sekme bulunamadı. 'list' ile aktif sekmeleri görebilirsin.")
                 continue
@@ -398,23 +514,74 @@ async def cmd_open(args) -> int:
         if args.profile_dir
         else PROFILE_ROOT / f"port-{args.port}"
     )
+    if args.reset_profile and profile_dir.exists():
+        import shutil
+
+        log(f"Profil sıfırlanıyor (--reset-profile): {profile_dir}")
+        shutil.rmtree(profile_dir, ignore_errors=True)
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Port collision check — bu sitetopng'in #1 numaralı sorununu engeller.
+    # NotebookLM MCP / Claude in Chrome / önceki sitetopng oturumu 9222'yi
+    # tutuyor olabilir. Tutuyorsa, hangi tarayıcının orada olduğunu söyle ve
+    # ya başka port seç (auto) ya da bağlanmayı reddet.
+    existing = _probe_cdp(args.port, timeout=1.0)
+    chosen_port = args.port
+    if existing is not None:
+        browser_name = existing.get("Browser", "unknown")
+        log(
+            f"⚠ Port {args.port} zaten kullanımda — başka bir Chrome (CDP) çalışıyor."
+        )
+        log(f"  Çalışan tarayıcı: {browser_name}")
+        log(
+            "  Bu büyük ihtimalle NotebookLM MCP, Claude-in-Chrome, ya da daha "
+            "önceki bir sitetopng oturumu."
+        )
+        if args.auto_port:
+            free = _find_free_port(args.port + 1)
+            if free is None:
+                print(
+                    "[!] Boş CDP portu bulunamadı (9223–9300). "
+                    "Diğer Chrome'u kapat veya --port ile manuel ver."
+                )
+                return 1
+            chosen_port = free
+            log(f"  --auto-port aktif → port {chosen_port} kullanılacak.")
+        else:
+            print(
+                "\n[!] Aksi takdirde sitetopng yanlış Chrome'a bağlanır ve "
+                "yanlış sekmeden screenshot alır.\n"
+                "    Çözüm seçenekleri:\n"
+                "      1) Diğer Chrome/CDP oturumunu kapat, tekrar dene\n"
+                "      2) Farklı port: --port 9230\n"
+                "      3) Otomatik boş port: --auto-port\n"
+            )
+            return 1
+
+    # Disable Chrome session restore (prevents previous tabs/NotebookLM/etc.
+    # from reopening on launch). Writes to <profile>/Default/Preferences before
+    # Chrome reads it.
+    _disable_session_restore(profile_dir)
 
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     chrome_args = [
         chrome_path,
-        f"--remote-debugging-port={args.port}",
+        f"--remote-debugging-port={chosen_port}",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
         "--disable-features=AutomationControlled,InfiniteSessionRestore",
+        # --restore-last-session=false is a switch some Chromium forks accept.
+        # Harmless on stock Chrome (unknown switches are ignored).
+        "--restore-last-session=false",
         args.start_url or "about:blank",
     ]
 
     log(f"Tarayıcı: {chrome_path}")
-    log(f"CDP port: {args.port}")
+    log(f"CDP port: {chosen_port}")
     log(f"Profil: {profile_dir}")
     log(f"Çıktı klasörü: {out_dir}")
 
@@ -425,19 +592,19 @@ async def cmd_open(args) -> int:
     browser_proc = subprocess.Popen(chrome_args, creationflags=creation_flags)
 
     try:
-        wait_for_cdp(args.port, timeout=25.0)
+        wait_for_cdp(chosen_port, timeout=25.0)
     except RuntimeError as exc:
         browser_proc.terminate()
         print(f"[!] {exc}")
         return 1
 
-    log("CDP hazır. Playwright bağlanıyor...")
+    log(f"CDP hazır (port {chosen_port}). Playwright bağlanıyor...")
     session = SessionState(out_dir=out_dir)
 
     async with async_playwright() as playwright:
         try:
             browser = await playwright.chromium.connect_over_cdp(
-                f"http://127.0.0.1:{args.port}"
+                f"http://127.0.0.1:{chosen_port}"
             )
         except Exception as exc:
             browser_proc.terminate()
@@ -457,7 +624,7 @@ async def cmd_open(args) -> int:
         )
 
         try:
-            await repl_loop(context, session)
+            await repl_loop(browser, session)
         finally:
             try:
                 await browser.close()
@@ -504,9 +671,8 @@ async def cmd_capture(args) -> int:
         if not contexts:
             print("[!] Aktif context yok.")
             return 1
-        context = contexts[0]
 
-        page = await pick_target_page(context, args)
+        page = await pick_target_page(browser, args)
         if page is None:
             print("[!] Hedef sekme bulunamadı.")
             await browser.close()
@@ -545,6 +711,16 @@ def build_main_parser() -> argparse.ArgumentParser:
         "--profile-dir",
         default=None,
         help=f"Tarayıcı user-data-dir (varsayılan: {PROFILE_ROOT}/port-<PORT>).",
+    )
+    open_parser.add_argument(
+        "--reset-profile",
+        action="store_true",
+        help="Profil klasörünü açmadan önce sil (NotebookLM gibi eski tab'ları temizler).",
+    )
+    open_parser.add_argument(
+        "--auto-port",
+        action="store_true",
+        help="Port çakışırsa otomatik bir sonraki boş portu kullan (9223–9300).",
     )
     open_parser.add_argument(
         "--out-dir",

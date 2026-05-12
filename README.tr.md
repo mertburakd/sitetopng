@@ -236,7 +236,7 @@ python capture.py capture --selector ".score-card" --out card.png
 
 `open` icin:
 
-- `--port` (varsayilan `9222`) — CDP portu.
+- `--port` (varsayilan `9533`) — CDP portu. NotebookLM MCP, Claude-in-Chrome ve diger CDP araclarinin kullandigi `9222` (Chrome default) ile cakismamasi icin kasten ozel bir port secildi.
 - `--browser` (`auto|chrome|edge|chromium`) — kullanilacak tarayici.
 - `--executable-path` — `chrome.exe` / `msedge.exe` icin acik yol.
 - `--profile-dir` — persistent user-data profilini override eder.

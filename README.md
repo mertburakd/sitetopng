@@ -238,7 +238,7 @@ python capture.py capture --selector ".score-card" --out card.png
 
 `open` flags:
 
-- `--port` (default `9222`) — CDP port to expose.
+- `--port` (default `9533`) — CDP port to expose. Default deliberately uncommon to avoid colliding with the Chrome DevTools default `9222` used by NotebookLM MCP, Claude in Chrome, and other CDP tools.
 - `--browser` (`auto|chrome|edge|chromium`) — which browser to launch.
 - `--executable-path` — explicit path to `chrome.exe` / `msedge.exe`, etc.
 - `--profile-dir` — override the persistent user-data profile dir.
